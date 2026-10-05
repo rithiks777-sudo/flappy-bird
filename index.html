@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Flappy Bird</title>
+<script src="https://telegram.org/js/games.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#70c5ce;
+    font-family:'Trebuchet MS','Segoe UI',sans-serif; touch-action:manipulation;
+    user-select:none; -webkit-user-select:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; border-radius:8px; box-shadow:0 10px 40px rgba(0,0,0,.35); }
+  #shareBtn {
+    position:fixed; left:50%; transform:translateX(-50%); bottom:calc(6vh + 0px);
+    display:none; padding:14px 34px; font-size:18px; font-weight:bold; color:#fff;
+    background:linear-gradient(180deg,#4da3ff,#2b7de0); border:none; border-radius:40px;
+    box-shadow:0 4px 14px rgba(0,0,0,.3); cursor:pointer; z-index:10;
+  }
+  #shareBtn:active { transform:translateX(-50%) scale(.96); }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<button id="shareBtn">Share score</button>
+<script>
+(function(){
+  'use strict';
+  var W = 360, H = 540;
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var shareBtn = document.getElementById('shareBtn');
+
+  function fit(){
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width = (W*scale) + 'px';
+    canvas.style.height = (H*scale) + 'px';
+    canvas.width = W*dpr; canvas.height = H*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', fit); fit();
+
+  // ---------- audio (tiny beeps, no assets) ----------
+  var AC = null;
+  function beep(freq, dur, type, vol){
+    try{
+      AC = AC || new (window.AudioContext||window.webkitAudioContext)();
+      var o = AC.createOscillator(), g = AC.createGain();
+      o.type = type||'square'; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol||0.06, AC.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + dur);
+      o.connect(g); g.connect(AC.destination);
+      o.start(); o.stop(AC.currentTime + dur);
+    }catch(e){}
+  }
+
+  // ---------- game state ----------
+  var bird, pipes, clouds, score, best, state, frame, groundX, flash;
+  best = parseInt(localStorage.getItem('flappy_best')||'0', 10) || 0;
+
+  function reset(){
+    bird = { x: 90, y: H/2 - 60, vy: 0, r: 14, rot: 0, wing: 0 };
+    pipes = []; clouds = [];
+    for (var i=0;i<5;i++) clouds.push({x:Math.random()*W, y:20+Math.random()*120, s:0.5+Math.random()*0.8});
+    score = 0; frame = 0; groundX = 0; flash = 0;
+    state = 'ready';
+    shareBtn.style.display = 'none';
+  }
+
+  var GRAV = 0.42, FLAP = -7.2, PIPE_W = 64, GAP = 148, SPEED0 = 2.2;
+
+  function speed(){ return SPEED0 + Math.min(score*0.03, 1.6); }
+
+  function spawnPipe(){
+    var margin = 70, minY = margin, maxY = H - 120 - GAP - margin;
+    var topH = minY + Math.random()*(maxY - minY);
+    pipes.push({ x: W + 10, top: topH, scored: false });
+  }
+
+  function flap(){
+    if (state === 'ready'){ state = 'play'; }
+    if (state === 'play'){
+      bird.vy = FLAP; bird.wing = 6;
+      beep(520, 0.07, 'square', 0.05);
+    } else if (state === 'dead' && flash <= 0){
+      reset();
+    }
+  }
+
+  function die(){
+    if (state !== 'play') return;
+    state = 'dead'; flash = 30;
+    beep(160, 0.35, 'sawtooth', 0.08);
+    setTimeout(function(){ beep(120, 0.4, 'sawtooth', 0.08); }, 120);
+    if (score > best){ best = score; localStorage.setItem('flappy_best', String(best)); }
+    if (window.TelegramGameProxy){ shareBtn.style.display = 'block'; }
+  }
+
+  // ---------- update ----------
+  function update(){
+    frame++;
+    for (var i=0;i<clouds.length;i++){
+      clouds[i].x -= 0.3*clouds[i].s;
+      if (clouds[i].x < -60){ clouds[i].x = W + 40; clouds[i].y = 20+Math.random()*120; }
+    }
+    if (state === 'ready'){
+      bird.y = H/2 - 60 + Math.sin(frame*0.08)*8;
+      bird.rot = Math.sin(frame*0.08)*0.08;
+      groundX = (groundX + 2) % 24;
+      return;
+    }
+    if (state === 'dead'){
+      if (flash > 0) flash--;
+      if (bird.y < H - 96 - bird.r){ bird.vy += GRAV; bird.y += bird.vy; bird.rot = Math.min(bird.rot + 0.08, 1.4); }
+      return;
+    }
+    // play
+    if (frame % 92 === 0) spawnPipe();
+    bird.vy += GRAV; bird.y += bird.vy;
+    bird.rot = bird.vy < 0 ? Math.max(bird.rot - 0.12, -0.4) : Math.min(bird.rot + 0.09, 1.35);
+    if (bird.wing > 0) bird.wing--;
+    groundX = (groundX + speed()) % 24;
+
+    var sp = speed();
+    for (var j=pipes.length-1;j>=0;j--){
+      var p = pipes[j];
+      p.x -= sp;
+      if (!p.scored && p.x + PIPE_W < bird.x){ p.scored = true; score++; beep(880, 0.09, 'sine', 0.07); }
+      if (p.x + PIPE_W < -20){ pipes.splice(j,1); continue; }
+      // collision
+      var bx0 = bird.x - bird.r + 3, bx1 = bird.x + bird.r - 3;
+      if (bx1 > p.x && bx0 < p.x + PIPE_W){
+        if (bird.y - bird.r + 4 < p.top || bird.y + bird.r - 4 > p.top + GAP){ die(); }
+      }
+    }
+    if (bird.y + bird.r >= H - 96 || bird.y - bird.r <= 0) die();
+  }
+
+  // ---------- draw ----------
+  function roundRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  }
+
+  function drawPipe(x, y, h, isTop){
+    var g = ctx.createLinearGradient(x,0,x+PIPE_W,0);
+    g.addColorStop(0,'#5fae3f'); g.addColorStop(0.5,'#8fd45f'); g.addColorStop(1,'#4c9334');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y, 4, h);
+    ctx.fillRect(x+4, y, PIPE_W-8, h);
+    ctx.fillRect(x+PIPE_W-4, y, 4, h);
+    var capH = 26, capY = isTop ? y+h-capH : y;
+    ctx.fillStyle = '#3f7d2c'; roundRect(x-3, capY, PIPE_W+6, capH, 5); ctx.fill();
+    ctx.fillStyle = g; roundRect(x-1, capY+2, PIPE_W+2, capH-4, 4); ctx.fill();
+  }
+
+  function drawBird(){
+    ctx.save();
+    ctx.translate(bird.x, bird.y); ctx.rotate(bird.rot);
+    // body
+    var bg = ctx.createLinearGradient(0,-14,0,14);
+    bg.addColorStop(0,'#ffe066'); bg.addColorStop(1,'#f5a623');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.ellipse(0,0,bird.r+3,bird.r,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#c67f1b'; ctx.lineWidth = 2; ctx.stroke();
+    // wing
+    var wa = bird.wing > 0 ? -0.9 : Math.sin(frame*0.5)*0.25;
+    ctx.save(); ctx.translate(-4,2); ctx.rotate(wa);
+    ctx.fillStyle = '#f08c1e';
+    ctx.beginPath(); ctx.ellipse(-6,0,9,6,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#c67f1b'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.restore();
+    // eye
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(6,-5,5.5,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(7.5,-5,2.6,0,Math.PI*2); ctx.fill();
+    // beak
+    ctx.fillStyle = '#ff7b2e';
+    ctx.beginPath(); ctx.moveTo(13,-1); ctx.lineTo(22,2); ctx.lineTo(13,5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(){
+    // sky
+    var sky = ctx.createLinearGradient(0,0,0,H);
+    sky.addColorStop(0,'#6fc7d6'); sky.addColorStop(1,'#aee3d8');
+    ctx.fillStyle = sky; ctx.fillRect(0,0,W,H);
+    // clouds
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    for (var i=0;i<clouds.length;i++){
+      var c = clouds[i];
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 16*c.s, 0, Math.PI*2);
+      ctx.arc(c.x+18*c.s, c.y+3*c.s, 12*c.s, 0, Math.PI*2);
+      ctx.arc(c.x-18*c.s, c.y+4*c.s, 11*c.s, 0, Math.PI*2);
+      ctx.fill();
+    }
+    // pipes
+    for (var j=0;j<pipes.length;j++){
+      var p = pipes[j];
+      drawPipe(p.x, 0, p.top, true);
+      drawPipe(p.x, p.top + GAP, H - 96 - (p.top + GAP), false);
+    }
+    // ground
+    ctx.fillStyle = '#ded895'; ctx.fillRect(0, H-96, W, 96);
+    ctx.fillStyle = '#9ee37d'; ctx.fillRect(0, H-96, W, 18);
+    ctx.fillStyle = '#7cc24f';
+    for (var gx=-24; gx<W+24; gx+=24) ctx.fillRect(gx - groundX, H-96, 12, 18);
+    ctx.fillStyle = 'rgba(0,0,0,.12)'; ctx.fillRect(0, H-96, W, 3);
+
+    drawBird();
+
+    // score
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 4;
+    ctx.font = 'bold 44px Trebuchet MS, sans-serif'; ctx.textAlign = 'center';
+    ctx.strokeText(score, W/2, 90); ctx.fillText(score, W/2, 90);
+
+    if (state === 'ready'){
+      ctx.font = 'bold 22px Trebuchet MS, sans-serif';
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 4;
+      var t = 'Tap to start';
+      ctx.strokeText(t, W/2, H/2 + 70); ctx.fillText(t, W/2, H/2 + 70);
+    }
+    if (state === 'dead' && flash <= 0){
+      ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#fff';
+      roundRect(W/2-120, H/2-110, 240, 190, 14); ctx.fill();
+      ctx.fillStyle = '#e8590c'; ctx.font = 'bold 26px Trebuchet MS, sans-serif';
+      ctx.fillText('GAME OVER', W/2, H/2 - 66);
+      ctx.fillStyle = '#555'; ctx.font = 'bold 17px Trebuchet MS, sans-serif';
+      ctx.fillText('SCORE', W/2, H/2 - 28);
+      ctx.fillStyle = '#222'; ctx.font = 'bold 40px Trebuchet MS, sans-serif';
+      ctx.fillText(score, W/2, H/2 + 14);
+      ctx.fillStyle = '#888'; ctx.font = '15px Trebuchet MS, sans-serif';
+      ctx.fillText('Best: ' + best, W/2, H/2 + 46);
+    }
+    if (flash > 0){ ctx.fillStyle = 'rgba(255,255,255,'+(flash/30*0.8)+')'; ctx.fillRect(0,0,W,H); }
+  }
+
+  function loop(){ update(); draw(); requestAnimationFrame(loop); }
+
+  // ---------- input ----------
+  function onPress(e){
+    if (e) e.preventDefault();
+    if (AC && AC.state === 'suspended') AC.resume();
+    flap();
+  }
+  canvas.addEventListener('pointerdown', onPress);
+  document.addEventListener('keydown', function(e){
+    if (e.code === 'Space' || e.code === 'ArrowUp'){ onPress(e); }
+  });
+  shareBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    try { TelegramGameProxy.shareScore(); } catch(err){}
+  });
+  document.addEventListener('pointerdown', function(e){
+    if (e.target === shareBtn) e.stopPropagation();
+  }, true);
+
+  reset(); loop();
+})();
+</script>
+</body>
+</html>
